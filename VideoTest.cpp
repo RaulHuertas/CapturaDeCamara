@@ -15,6 +15,10 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <netdb.h>
+#include <thread>
+#include <signal.h>
+#include <unistd.h>
+
 
 using namespace std;
 using namespace cv;
@@ -33,52 +37,59 @@ unsigned long long tiempoActual_ms(){
 
 
 void transmitirPorUDP(
-    int ancho, int alto, int formatoStream,
-    const std::vector<uchar>& imagenComprimida,
-    int sockfd, struct sockaddr_in& serveraddr, int serverlen
-){
+                      int ancho, int alto, int formatoStream,
+                      const std::vector<uchar>& imagenComprimida,
+                      int sockfd, struct sockaddr_in& serveraddr, int serverlen
+                      ){
+    
     constexpr int sizePaquetes = 2*2048;
     constexpr int headerSize = 1+5*sizeof(int);
     int nPacks = imagenComprimida.size()/sizePaquetes;
     int bytesSobrantes = imagenComprimida.size()%sizePaquetes;
     //int totalSize = nPacks*(1+4*sizeof(int)+sizePaquetes);/
     if(bytesSobrantes>0){
-        nPacks++;        
+        nPacks++;
     }
-    int offsetDatos =0;    
+    int offsetDatos =0;
     std::vector<uchar> bufferTrans;
     bufferTrans.resize(headerSize+sizePaquetes);
     int porEnviar = imagenComprimida.size();
     const int totalImageSize=imagenComprimida.size();
     for(int p = 0; p<nPacks; p++){
-   	uchar *datos = bufferTrans.data();
+        uchar *datos = bufferTrans.data();
         datos[0] = 0xFF; datos+=1;
-	//cout<<"EnviandoOFFSET: "<<offsetDatos<<endl;
+        //cout<<"EnviandoOFFSET: "<<offsetDatos<<endl;
         memcpy(datos, &offsetDatos, sizeof(offsetDatos)); datos+=sizeof(offsetDatos);
         memcpy(datos, &totalImageSize, sizeof(totalImageSize)); datos+=sizeof(totalImageSize);
-	memcpy(datos, &ancho, sizeof(ancho)); datos+=sizeof(ancho);
-	memcpy(datos, &alto, sizeof(alto)); datos+=sizeof(alto);
-	memcpy(datos, &formatoStream, sizeof(formatoStream)); datos+=sizeof(formatoStream);
+        memcpy(datos, &ancho, sizeof(ancho)); datos+=sizeof(ancho);
+        memcpy(datos, &alto, sizeof(alto)); datos+=sizeof(alto);
+        memcpy(datos, &formatoStream, sizeof(formatoStream)); datos+=sizeof(formatoStream);
         int nDatosAEnviarEnEstePaquete = std::min(sizePaquetes, porEnviar);
         memcpy(
-            datos,
-            &imagenComprimida[offsetDatos],
-            nDatosAEnviarEnEstePaquete
-        );datos+=nDatosAEnviarEnEstePaquete;
-	const int packSize=nDatosAEnviarEnEstePaquete+headerSize;
-	sendto(
-		sockfd,
-		bufferTrans.data(),
-		packSize,
-		0,
-		(sockaddr*)&serveraddr,
-		serverlen
-	);
-
-	porEnviar-=nDatosAEnviarEnEstePaquete;        
+               datos,
+               &imagenComprimida[offsetDatos],
+               nDatosAEnviarEnEstePaquete
+               );datos+=nDatosAEnviarEnEstePaquete;
+        const int packSize=nDatosAEnviarEnEstePaquete+headerSize;
+        sendto(
+               sockfd,
+               bufferTrans.data(),
+               packSize,
+               0,
+               (sockaddr*)&serveraddr,
+               serverlen
+               );
+        
+        porEnviar-=nDatosAEnviarEnEstePaquete;
         offsetDatos+=nDatosAEnviarEnEstePaquete;
     }
     
+}
+
+volatile sig_atomic_t terminar = 0;
+void signal_handler(int signal)
+{
+    terminar = 1;
 }
 
 int main( int argc, char** argv )
@@ -90,15 +101,21 @@ int main( int argc, char** argv )
     int serverlen;
     
     
-    if(argc!=3){
+    if(argc!=5){
         printf("Argumentos del programa invalidos\n");
-        printf("Invocarlo como: Test2 <direccionDestino>  <puertoDestino>\n");
+        printf("Invocarlo como: Test2 <direccionDestino>  <puertoDestino> <ancho> <alto>\n");
         exit(EXIT_FAILURE);
     }
+    //Capturar señal de Ctrl+C para terminar e lprograma
+    signal(SIGINT, signal_handler);
     
-    //CREANDO SOCKET UDP
+    //Captura de parametros de la linea de comandos
+    int anchoImagen, altoImagen;
     hostname = argv[1];
     portno = atoi(argv[2]);
+    anchoImagen = atoi(argv[3]);
+    altoImagen = atoi(argv[4]);
+    //CREANDO SOCKET UDP
     sockfd = socket(AF_INET, SOCK_DGRAM, 0);
     if (sockfd < 0){
         errorPrograma("ERROR abriendo el socket");
@@ -118,64 +135,69 @@ int main( int argc, char** argv )
     
     /// Load the source image
     VideoCapture cap(0);
+    cap.set(CV_CAP_PROP_FRAME_WIDTH, anchoImagen);
+    cap.set(CV_CAP_PROP_FRAME_HEIGHT, altoImagen);
     if(!cap.isOpened()){
+        cout<<"No se puede abrir el dispositivo de captura "<<endl;
         return -1;
     }
-    cout<<"CAP_PROP_FRAME_WIDTH: "<<cap.get(CAP_PROP_FRAME_WIDTH)<<endl;
-    cout<<"CAP_PROP_FRAME_HEIGHT: "<<cap.get(CAP_PROP_FRAME_HEIGHT)<<endl;
-    cout<<"CAP_PROP_FPS: "<<cap.get(CAP_PROP_FPS)<<endl;
-    cout<<"CAP_PROP_FOURCC: "<<cap.get(CAP_PROP_FOURCC)<<endl;
-    int formatoStream = cap.get(CAP_PROP_FORMAT);
-    cout<<"CAP_PROP_FORMAT: "<<formatoStream<<endl;
-    cout<<"CAP_PROP_FORMAT ESQ: "<<((formatoStream==CV_8UC(3))?"true":"false")<<endl;
-
-    Mat edges;
-    namedWindow("edges",1);
+    cout<<"CAP_PROP_FRAME_WIDTH: "<<cap.get(CV_CAP_PROP_FRAME_WIDTH)<<endl;
+    cout<<"CAP_PROP_FRAME_HEIGHT: "<<cap.get(CV_CAP_PROP_FRAME_HEIGHT)<<endl;
+    //cout<<"CAP_PROP_FPS: "<<cap.get(CV_CAP_PROP_FPS)<<endl;
+    //cout<<"CAP_PROP_FOURCC: "<<cap.get(CV_CAP_PROP_FOURCC)<<endl;
+    int formatoStream = cap.get(CV_CAP_PROP_FORMAT);
+    //cout<<"CAP_PROP_FORMAT: "<<formatoStream<<endl;
+    //cout<<"CAP_PROP_FORMAT ESQ: "<<((formatoStream==CV_8UC(3))?"true":"false")<<endl;
+    
+    
     unsigned long long marcaTiempoInicial = tiempoActual_ms();
     int cuadrosProcesados = 0;
-    for(;;)
+    std::vector<uchar> imagenComprimida;
+    imagenComprimida.reserve(1024*768);
+    std::vector<int> parametrosCompresion(2);
+    parametrosCompresion[0] = cv::IMWRITE_JPEG_QUALITY;
+    parametrosCompresion[1] = 95;
+    Mat* frame = nullptr;
+    while(terminar==0)
     {
-        Mat frame;
-        cap >> frame; // get a new frame from camera
-        //cvtColor(frame, edges, COLOR_BGR2GRAY);
-        //GaussianBlur(edges, edges, Size(7,7), 1.5, 1.5);
-        //Canny(edges, edges, 0, 30, 3);
-        //imshow("edges", edges);
-        cuadrosProcesados++;
-        //Comprimir a JPEG
-        std::vector<uchar> imagenComprimida;//buffer for coding
-        imagenComprimida.reserve(1280*720*3);
-        std::vector<int> parametrosCompresion(2);
-        parametrosCompresion[0] = cv::IMWRITE_JPEG_QUALITY;
-        parametrosCompresion[1] = 80;
-        cv::imencode(".jpg", frame, imagenComprimida, parametrosCompresion);
-        
-	//TRANSMISION POR UDP
-        transmitirPorUDP(frame.cols, frame.rows, formatoStream, imagenComprimida, sockfd, serveraddr, serverlen);
-        
-        auto tiempoActual = tiempoActual_ms();
-        if((tiempoActual-marcaTiempoInicial)>1000){
-            marcaTiempoInicial = tiempoActual;
-            cout<<"Cuadros procesados en los ultimos 1 segundos: "<<cuadrosProcesados<<endl;
-            auto frameSize = frame.size();
-            cout<<"Ancho de imagen: "<<frame.cols<<endl;
-            cout<<"Alto de imagen: "<<frame.rows<<endl;
-            cout<<"Profundidad de imagen: "<<frame.depth()<<endl;
-            cout<<"Dimensiones de imagen: "<<frame.dims<<endl;
-            cout<<"CAP_PROP_FPS: "<<cap.get(CAP_PROP_FPS)<<endl;
-            cout<<"imagenComprimida.size(): "<<imagenComprimida.size()<<endl;
-            //cout<<"DATOS: "<<endl;
-            //cout<<frame<<endl;
-            cout<<endl;
-            cuadrosProcesados=0;
+        //iniciar el procesamiento de la imagen ya capturada
+        std::thread hiloProc([&](){
+            if(frame!=nullptr){
+                cv::imencode(
+                             ".jpg", *frame, imagenComprimida,
+                             parametrosCompresion
+                             );
+                auto& pict = *frame;
+                transmitirPorUDP(pict.cols, pict.rows, formatoStream,
+                                 imagenComprimida, sockfd, serveraddr, serverlen);
+                cuadrosProcesados++;
+                auto tiempoActual = tiempoActual_ms();
+                if((tiempoActual-marcaTiempoInicial)>1000){
+                    marcaTiempoInicial = tiempoActual;
+                    cout<<"Cuadros procesados en los ultimos 1 segundos: "<<cuadrosProcesados<<endl;
+                    auto frameSize = pict.size();
+                    cout<<"Ancho de imagen: "<<pict.cols<<endl;
+                    cout<<"Alto de imagen: "<<pict.rows<<endl;
+                    cout<<"Profundidad de imagen: "<<pict.depth()<<endl;
+                    cout<<"Dimensiones de imagen: "<<pict.dims<<endl;
+                    cout<<"imagenComprimida.size(): "<<imagenComprimida.size()<<endl;
+                    cout<<endl;
+                    cuadrosProcesados=0;
+                }
+                delete frame;
+                
+            }
+            frame = nullptr;
         }
-        
-        
-        
-        
+                             );
+        Mat* cuadroCapturado = new Mat;;
+        cap >> *cuadroCapturado; // get a new frame from camera
+        hiloProc.join();
+        frame = cuadroCapturado;
     }
     // the camera will be deinitialized automatically in VideoCapture destructor
+    cout<<"FIN"<<endl;
     return 0;
-
+    
 }
 
