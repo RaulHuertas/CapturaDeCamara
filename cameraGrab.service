@@ -6,7 +6,7 @@ EnvironmentFile=/home/root/arguments.env
 ExecStart=/home/root/Test.elf $DIRECCION_IP $PUERTO $ANCHO_IMAGEN $ALTO_IMAGEN
 User=root
 Restart=always
-RestartSec=5
+RestartSec=1
 WorkingDirectory=/home/root/
 
 [Install]

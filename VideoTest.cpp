@@ -17,8 +17,11 @@
 #include <netdb.h>
 #include <thread>
 #include <signal.h>
+#include <QDateTime>
 #include <unistd.h>
-
+#include "video_utils.hpp"
+#include  <atomic>
+#include <fcntl.h>
 
 using namespace std;
 using namespace cv;
@@ -87,10 +90,14 @@ void transmitirPorUDP(
 }
 
 volatile sig_atomic_t terminar = 0;
+
 void signal_handler(int signal)
 {
     terminar = 1;
 }
+
+std::atomic_bool transmitir;
+std::atomic_bool grabar;
 
 int main( int argc, char** argv )
 {
@@ -99,8 +106,9 @@ int main( int argc, char** argv )
     struct sockaddr_in serveraddr;
     struct hostent* server;
     int serverlen;
-    
-    
+    int fpsImagen = 0;
+    transmitir = true;
+    grabar = true;
     if(argc!=5){
         printf("Argumentos del programa invalidos\n");
         printf("Invocarlo como: Test2 <direccionDestino>  <puertoDestino> <ancho> <alto>\n");
@@ -115,6 +123,7 @@ int main( int argc, char** argv )
     portno = atoi(argv[2]);
     anchoImagen = atoi(argv[3]);
     altoImagen = atoi(argv[4]);
+
     //CREANDO SOCKET UDP
     sockfd = socket(AF_INET, SOCK_DGRAM, 0);
     if (sockfd < 0){
@@ -131,7 +140,8 @@ int main( int argc, char** argv )
           (char *)&serveraddr.sin_addr.s_addr, server->h_length);
     serveraddr.sin_port = htons(portno);
     serverlen = sizeof(serveraddr);
-    
+    int flags = fcntl(sockfd, F_GETFL, 0);
+    fcntl(sockfd, F_SETFL, flags | O_NONBLOCK);
     
     /// Load the source image
     VideoCapture cap(0);
@@ -141,9 +151,10 @@ int main( int argc, char** argv )
         cout<<"No se puede abrir el dispositivo de captura "<<endl;
         return -1;
     }
+    fpsImagen = cap.get(CV_CAP_PROP_FPS);
     cout<<"CAP_PROP_FRAME_WIDTH: "<<cap.get(CV_CAP_PROP_FRAME_WIDTH)<<endl;
     cout<<"CAP_PROP_FRAME_HEIGHT: "<<cap.get(CV_CAP_PROP_FRAME_HEIGHT)<<endl;
-    //cout<<"CAP_PROP_FPS: "<<cap.get(CV_CAP_PROP_FPS)<<endl;
+    cout<<"CAP_PROP_FPS: "<<fpsImagen<<endl;
     //cout<<"CAP_PROP_FOURCC: "<<cap.get(CV_CAP_PROP_FOURCC)<<endl;
     int formatoStream = cap.get(CV_CAP_PROP_FORMAT);
     //cout<<"CAP_PROP_FORMAT: "<<formatoStream<<endl;
@@ -158,22 +169,42 @@ int main( int argc, char** argv )
     parametrosCompresion[0] = cv::IMWRITE_JPEG_QUALITY;
     parametrosCompresion[1] = 95;
     Mat* frame = nullptr;
+
+
+    video_start(anchoImagen, altoImagen, fpsImagen);
+
+    unsigned char rcvBuffer[4];
+
+    int tx_webcam_dly=0;
+    int tx_webcam_dly_ctr=0;
+    qulonglong tx_webcam_lastRex=0;
+    qulonglong thisIterationTime = QDateTime::currentMSecsSinceEpoch();
+
+
     while(terminar==0)
     {
         //iniciar el procesamiento de la imagen ya capturada
         std::thread hiloProc([&](){
+
             if(frame!=nullptr){
+                thisIterationTime = QDateTime::currentMSecsSinceEpoch();
                 cv::imencode(
                              ".jpg", *frame, imagenComprimida,
                              parametrosCompresion
                              );
                 auto& pict = *frame;
-                transmitirPorUDP(pict.cols, pict.rows, formatoStream,
+                if(transmitir && (tx_webcam_dly_ctr==0)){
+                    transmitirPorUDP(pict.cols, pict.rows, formatoStream,
                                  imagenComprimida, sockfd, serveraddr, serverlen);
+                }
+                if(grabar){
+                    video_addFrame_webcam(*frame);
+                }
                 cuadrosProcesados++;
                 auto tiempoActual = tiempoActual_ms();
                 if((tiempoActual-marcaTiempoInicial)>1000){
                     marcaTiempoInicial = tiempoActual;
+                    #ifdef QT_DEBUG
                     cout<<"Cuadros procesados en los ultimos 1 segundos: "<<cuadrosProcesados<<endl;
                     auto frameSize = pict.size();
                     cout<<"Ancho de imagen: "<<pict.cols<<endl;
@@ -182,11 +213,13 @@ int main( int argc, char** argv )
                     cout<<"Dimensiones de imagen: "<<pict.dims<<endl;
                     cout<<"imagenComprimida.size(): "<<imagenComprimida.size()<<endl;
                     cout<<endl;
+                    #endif //QT_DEBUG
                     cuadrosProcesados=0;
                 }
-                delete frame;
-                
+                video_checkTime(anchoImagen, altoImagen, fpsImagen, QDateTime::currentMSecsSinceEpoch());
+                delete frame;                    
             }
+
             frame = nullptr;
         }
                              );
@@ -194,7 +227,25 @@ int main( int argc, char** argv )
         cap >> *cuadroCapturado; // get a new frame from camera
         hiloProc.join();
         frame = cuadroCapturado;
+
+        //Versi hay comandosderecepcion
+        int bytesRecibidos = recv(sockfd, &rcvBuffer[0], sizeof(rcvBuffer), 0);
+        if(bytesRecibidos==sizeof(rcvBuffer)){
+            if(rcvBuffer[0] == 0xFF){
+                //transmitir = rcvBuffer[3];
+                tx_webcam_lastRex = thisIterationTime;
+            }
+        }
+        if((thisIterationTime-tx_webcam_lastRex)>500){
+            tx_webcam_dly = 32;
+        }else{
+            tx_webcam_dly = 1;
+        }
+        tx_webcam_dly_ctr++;
+        tx_webcam_dly_ctr%=tx_webcam_dly;
+
     }
+    video_close();
     // the camera will be deinitialized automatically in VideoCapture destructor
     cout<<"FIN"<<endl;
     return 0;
