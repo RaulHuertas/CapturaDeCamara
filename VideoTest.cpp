@@ -144,7 +144,7 @@ int main( int argc, char** argv )
     fcntl(sockfd, F_SETFL, flags | O_NONBLOCK);
     
     /// Load the source image
-    VideoCapture cap(0);
+    VideoCapture cap(detectUVCCamera());
     cap.set(CV_CAP_PROP_FRAME_WIDTH, anchoImagen);
     cap.set(CV_CAP_PROP_FRAME_HEIGHT, altoImagen);
     if(!cap.isOpened()){
